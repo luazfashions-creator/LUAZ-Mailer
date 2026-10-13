@@ -1,0 +1,12 @@
+{
+  "smtp_host": "smtp.gmail.com",
+  "smtp_port": 587,
+  "security": "STARTTLS",
+  "username": "",
+  "from_name": "LUAZ",
+  "from_email": "",
+  "reply_to": "",
+  "delay_seconds": 1.0,
+  "unsubscribe_mailto": "",
+  "footer": ""
+}

@@ -1,0 +1,12 @@
+{
+  "smtp_host": "smtp.zoho.eu",
+  "smtp_port": 587,
+  "security": "STARTTLS",
+  "username": "",
+  "from_name": "LUAZ Labs",
+  "from_email": "info@luazwellness.de",
+  "reply_to": "",
+  "delay_seconds": 1.0,
+  "unsubscribe_mailto": "",
+  "footer": ""
+}

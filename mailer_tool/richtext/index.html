@@ -1,0 +1,131 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;font-size:14px;color:#222;background:transparent}
+  #wrap{border:1px solid #c9ced6;border-radius:8px;overflow:hidden;background:#fff}
+  #bar{display:flex;flex-wrap:wrap;gap:4px;align-items:center;padding:6px;background:#f4f6f9;border-bottom:1px solid #dfe3e8}
+  #bar button,#bar select{height:30px;min-width:30px;border:1px solid #cfd5dd;border-radius:6px;background:#fff;cursor:pointer;font-size:14px;padding:0 8px;color:#222}
+  #bar button:hover,#bar select:hover{background:#eaf0fb}
+  #bar .sep{width:1px;height:22px;background:#d5dae1;margin:0 4px}
+  #bar input[type=color]{width:30px;height:30px;padding:2px;border:1px solid #cfd5dd;border-radius:6px;background:#fff;cursor:pointer}
+  #linkrow{display:none;gap:6px;padding:6px;background:#fffbe6;border-bottom:1px solid #eee3a8}
+  #linkrow input{flex:1;height:30px;border:1px solid #cfd5dd;border-radius:6px;padding:0 8px}
+  #ed{min-height:140px;padding:12px 14px;outline:none;line-height:1.5;overflow:auto}
+  #ed:empty:before{content:attr(data-ph);color:#9aa3af}
+  #ed a{color:#1a56db} #ed ul,#ed ol{margin:6px 0 6px 22px;padding:0}
+  @media (prefers-color-scheme:dark){ body{color:#eee} #wrap{background:#fff;color:#222} }
+</style></head>
+<body>
+<div id="wrap">
+  <div id="bar">
+    <button data-cmd="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+    <button data-cmd="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+    <button data-cmd="underline" title="Underline (Ctrl+U)"><u>U</u></button>
+    <button data-cmd="strikeThrough" title="Strikethrough"><s>S</s></button>
+    <span class="sep"></span>
+    <select id="block" title="Paragraph style">
+      <option value="P">Normal</option><option value="H1">Heading 1</option>
+      <option value="H2">Heading 2</option><option value="H3">Heading 3</option>
+    </select>
+    <select id="size" title="Text size">
+      <option value="">Size</option><option value="2">Small</option><option value="3">Normal</option>
+      <option value="5">Large</option><option value="6">Huge</option>
+    </select>
+    <input type="color" id="color" value="#1a56db" title="Text colour">
+    <span class="sep"></span>
+    <button data-cmd="insertUnorderedList" title="Bullet list">&bull; List</button>
+    <button data-cmd="insertOrderedList" title="Numbered list">1. List</button>
+    <button data-cmd="justifyLeft" title="Align left">&#8676;</button>
+    <button data-cmd="justifyCenter" title="Center">&#8596;</button>
+    <span class="sep"></span>
+    <button id="linkbtn" title="Add link">&#128279; Link</button>
+    <button data-cmd="unlink" title="Remove link">Unlink</button>
+    <button data-cmd="removeFormat" title="Clear formatting">Clear</button>
+    <button data-cmd="undo" title="Undo">&#8630;</button>
+    <button data-cmd="redo" title="Redo">&#8631;</button>
+    <span class="sep"></span>
+    <select id="ph" title="Insert a placeholder (replaced per recipient)"><option value="">+ Placeholder</option></select>
+  </div>
+  <div id="linkrow"><input id="url" placeholder="https://..."><button id="linkok">Add</button><button id="linkcancel">Cancel</button></div>
+  <div id="ed" contenteditable="true" data-ph="Write your message here..."></div>
+</div>
+<script>
+  const ed = document.getElementById("ed");
+  let inited = false, timer = null, saved = null, lastPh = null;
+
+  function send(type, data) { window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, data), "*"); }
+  function pushValue() { send("streamlit:setComponentValue", {value: ed.innerHTML, dataType: "json"}); }
+  function schedule() { clearTimeout(timer); timer = setTimeout(pushValue, 450); }
+  function setHeight(h) { send("streamlit:setFrameHeight", {height: h}); }
+
+  window.addEventListener("message", function (e) {
+    if (!e.data || e.data.type !== "streamlit:render") return;
+    const a = e.data.args || {};
+    if (!inited) {
+      ed.innerHTML = a.value || "";
+      ed.style.minHeight = (a.min_height || 140) + "px";
+      document.execCommand("styleWithCSS", false, true);
+      inited = true;
+    }
+    const list = a.placeholders || [], sig = list.join("|");
+    if (sig !== lastPh) {                       // rebuild the "+ Placeholder" menu when the columns change
+      lastPh = sig;
+      const ph = document.getElementById("ph");
+      while (ph.options.length > 1) ph.remove(1);
+      list.forEach(function (p) {
+        const o = document.createElement("option"); o.value = "{" + p + "}"; o.textContent = "{" + p + "}"; ph.appendChild(o);
+      });
+    }
+    setHeight(document.body.scrollHeight + 4);
+  });
+
+  // keep the text selection when clicking toolbar buttons
+  document.querySelectorAll("#bar button, #bar select").forEach(function (el) {
+    if (el.tagName === "BUTTON") el.addEventListener("mousedown", function (ev) { ev.preventDefault(); });
+  });
+  document.querySelectorAll("button[data-cmd]").forEach(function (b) {
+    b.addEventListener("click", function () { ed.focus(); document.execCommand(b.dataset.cmd, false, null); schedule(); });
+  });
+  document.getElementById("block").addEventListener("change", function (e) {
+    ed.focus(); document.execCommand("formatBlock", false, e.target.value); schedule();
+  });
+  document.getElementById("size").addEventListener("change", function (e) {
+    if (e.target.value) { ed.focus(); document.execCommand("fontSize", false, e.target.value); schedule(); }
+    e.target.value = "";
+  });
+  document.getElementById("color").addEventListener("input", function (e) {
+    ed.focus(); document.execCommand("foreColor", false, e.target.value); schedule();
+  });
+  document.getElementById("ph").addEventListener("change", function (e) {
+    if (e.target.value) { ed.focus(); document.execCommand("insertText", false, e.target.value); schedule(); }
+    e.target.value = "";
+  });
+
+  // link: small inline row instead of a browser prompt
+  const linkrow = document.getElementById("linkrow"), urlInput = document.getElementById("url");
+  document.getElementById("linkbtn").addEventListener("click", function () {
+    const sel = window.getSelection();
+    saved = sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+    linkrow.style.display = "flex"; urlInput.value = "https://"; urlInput.focus(); setHeight(document.body.scrollHeight + 4);
+  });
+  function closeLink() { linkrow.style.display = "none"; setHeight(document.body.scrollHeight + 4); }
+  document.getElementById("linkcancel").addEventListener("click", closeLink);
+  document.getElementById("linkok").addEventListener("click", function () {
+    ed.focus();
+    if (saved) { const s = window.getSelection(); s.removeAllRanges(); s.addRange(saved); }
+    const url = urlInput.value.trim();
+    if (url && url !== "https://") {
+      if (window.getSelection().isCollapsed) document.execCommand("insertHTML", false, '<a href="' + url.replace(/"/g, "") + '">' + url.replace(/</g, "") + "</a>");
+      else document.execCommand("createLink", false, url);
+    }
+    closeLink(); schedule();
+  });
+  urlInput.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); document.getElementById("linkok").click(); } });
+
+  ed.addEventListener("input", schedule);
+  ed.addEventListener("blur", pushValue);
+  new ResizeObserver(function () { setHeight(document.body.scrollHeight + 4); }).observe(document.body);
+
+  send("streamlit:componentReady", {apiVersion: 1});
+</script></body></html>
