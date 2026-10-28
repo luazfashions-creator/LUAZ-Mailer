@@ -2,4 +2,8 @@
 __pycache__/
 *.pyc
 .DS_Store
-mailer_tool/tempCodeRunnerFile.bat
+tempCodeRunnerFile.bat
+.smtp_secret
+sent_log.csv
+unsubscribed.csv
+LUAZ Mailer/

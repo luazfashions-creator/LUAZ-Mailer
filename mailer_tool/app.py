@@ -7,6 +7,17 @@ from richtext_widget import rich_editor
 st.set_page_config(page_title="Bulk Mailer", page_icon="✉️", layout="wide")
 st.title("✉️ Bulk Mailer")
 
+import os
+_gate = os.environ.get("MAILER_APP_PASSWORD")          # set this when the app runs on a server
+if _gate and not st.session_state.get("_authed"):
+    _p = st.text_input("Password to open the mailer", type="password")
+    if _p and _p == _gate:
+        st.session_state["_authed"] = True
+        st.rerun()
+    elif _p:
+        st.error("Wrong password.")
+    st.stop()
+
 import json
 from pathlib import Path
 
@@ -56,9 +67,12 @@ with tab_settings:
             for k, v in m.PRESETS[p].items():
                 st.session_state[K(k)] = v
 
+    st.session_state.setdefault(K("preset"), m.preset_for(cfg))
+    st.session_state.setdefault(K("password"), m.load_secret())
     st.selectbox("Provider preset (fills host / port / security)", ["(choose)"] + list(m.PRESETS),
                  key=K("preset"), on_change=apply_preset)
-    st.caption("Gmail: App Password needed.  Zoho: use the host matching your data centre "
+    st.caption("SendGrid: username is the word apikey, password is your SendGrid API key (starts with SG.).  "
+               "Gmail: App Password needed.  Zoho: use the host matching your data centre "
                "(.eu for Germany) and an App-Specific Password if 2FA is on.  "
                "Daily limits: Gmail ~500, Zoho free ~200.")
     c1, c2 = st.columns(2)
@@ -68,15 +82,19 @@ with tab_settings:
     cfg["security"] = c1.selectbox("Security", sec, key=K("security"))
     cfg["username"] = c2.text_input("SMTP username (empty = use From email)", key=K("username"))
     st.session_state[K("password")] = st.text_input(
-        "SMTP password / app password (kept in memory only, never saved) - press Enter after pasting",
+        "SMTP password / API key - press Enter after pasting",
         type="password", value=st.session_state.get(K("password"), ""))
+    remember = st.checkbox("Remember this key (saved as a plain file in this business's folder, so anyone "
+                           "who can open this app can send). Untick and save to forget it.",
+                           value=m.has_saved_secret(), key=K("remember"))
     cfg["from_name"] = c1.text_input("From name", key=K("from_name"))
     cfg["from_email"] = c2.text_input("From email", key=K("from_email"))
     cfg["reply_to"] = c1.text_input("Reply-To (optional)", key=K("reply_to"))
     cfg["unsubscribe_mailto"] = c2.text_input(
         "Unsubscribe mailbox (optional, adds List-Unsubscribe header)", key=K("unsubscribe_mailto"))
     cfg["delay_seconds"] = c1.number_input("Delay between emails (seconds)", min_value=0.0, step=0.5,
-                                           key=K("delay_seconds"))
+                                           key=K("delay_seconds"),
+                                           help="Slower looks more natural to providers. For a new mailbox use 10-30 s.")
     cfg["footer"] = st.text_area("Footer added to every email (address / how to unsubscribe)",
                                  height=80, key=K("footer"))
     st.markdown("**Signature** - added under every email of this business")
@@ -101,7 +119,13 @@ with tab_settings:
         elif remove_logo:
             cfg["signature_logo"] = ""
         m.save_config(cfg)
-        st.success(f"Saved sender settings for {profile} (password not saved).")
+        pw_now = st.session_state.get(K("password"), "")
+        if remember and pw_now:
+            m.save_secret(pw_now)
+        elif not remember:
+            m.delete_secret()
+        st.success(f"Saved sender settings for {profile}" + (" - key remembered." if remember and pw_now else
+                                                              " (key not saved)."))
 
 # ---------------- Log ----------------
 with tab_log:
@@ -264,9 +288,14 @@ with tab_send:
                 df = pd.concat([df, manual], ignore_index=True).fillna("")
                 st.caption(f"Added {len(manual)} typed address(es) to the list.")
         cols = list(df.columns)
-        skip_today = st.checkbox("Skip addresses already emailed successfully today", value=True)
+        SKIP = {"today": "today", "in the last 7 days": 7, "in the last 30 days": 30,
+                "ever (any time before)": "ever", "don't skip anyone": None}
+        skip_label = st.selectbox("Skip addresses I already emailed successfully ...", list(SKIP), index=0,
+                                  key=f"skip_{profile}",
+                                  help="Use 'ever' for campaigns so nobody gets the same mail twice, "
+                                       "and to continue a run that was interrupted.")
         if len(df):
-            ready, rep = m.clean_contacts(df, email_col, skip_today)
+            ready, rep = m.clean_contacts(df, email_col, skip_window=SKIP[skip_label])
         else:
             ready = pd.DataFrame(columns=list(df.columns) + ["_email"])
             rep = {"total": 0, "invalid": 0, "duplicates": 0, "unsubscribed": 0, "already_sent_today": 0, "ready": 0}
@@ -275,7 +304,7 @@ with tab_send:
         k1.metric("Rows", rep["total"])
         k2.metric("Invalid", rep["invalid"])
         k3.metric("Duplicates", rep["duplicates"])
-        k4.metric("Unsubscribed / sent today", rep["unsubscribed"] + rep["already_sent_today"])
+        k4.metric("Unsubscribed / already sent", rep["unsubscribed"] + rep["already_sent_today"])
         k5.metric("Will receive", rep["ready"])
         if len(ready):
             with st.expander("Preview recipients"):
@@ -369,13 +398,20 @@ with tab_send:
             except Exception as ex:  # noqa: BLE001
                 st.error(f"Test failed: {ex}")
 
-        ok_to_send = bool(subject.strip() and body.strip() and cfg["from_email"] and n_ready)
+        portion = st.number_input("Send only the first N now (0 = everyone). The rest stay unsent for a later run.",
+                                  min_value=0, value=0, step=10, key=f"portion_{profile}",
+                                  help="New mailboxes are throttled quickly. Start small (e.g. 20-30 per day) and "
+                                       "increase slowly.")
+        to_send = ready.head(int(portion)) if portion else ready
+        n_send = len(to_send)
+        ok_to_send = bool(subject.strip() and body.strip() and cfg["from_email"] and n_send)
         if not n_ready:
             st.caption("Choose recipients in step 2 to enable sending.")
         elif not (subject.strip() and body.strip()):
             st.caption("Write a subject and a message in step 1 to enable sending.")
-        confirm = st.checkbox(f"I confirm I want to email {n_ready} people now", disabled=not ok_to_send)
-        if st.button("🚀 Send to all", type="primary", disabled=not (ok_to_send and confirm)):
+        confirm = st.checkbox(f"I confirm I want to email {n_send} people now", disabled=not ok_to_send)
+        if st.button("🚀 Send to all" if not portion else f"🚀 Send first {n_send}", type="primary",
+                     disabled=not (ok_to_send and confirm)):
             bar = st.progress(0.0)
             status = st.empty()
 
@@ -384,12 +420,20 @@ with tab_send:
                 status.write(f"{i}/{total} · {addr} · ✅ {sent} sent · ❌ {failed} failed")
 
             try:
-                sent, failed = m.send_batch(cfg_send, pw, ready, subject, body, is_html, progress,
+                sent, failed = m.send_batch(cfg_send, pw, to_send, subject, body, is_html, progress,
                                             attachments=attachments)
             except Exception as ex:  # noqa: BLE001
                 st.error(f"Could not start sending: {ex}")
                 st.stop()
-            if failed:
+            if m.LAST_RUN.get("stopped_early"):
+                st.error(f"⛔ Stopped early to protect your mailbox: the provider is refusing mail "
+                         f"(sending limit / spam protection). Sent {sent}, failed {failed}, and "
+                         f"{m.LAST_RUN['not_attempted']} addresses were NOT attempted. Provider said: "
+                         f"{m.LAST_RUN['reason']}")
+                st.info("Do not retry right away. Wait several hours (or a day), then send again with "
+                        "'Skip addresses I already emailed ... ever' selected - only the unsent ones go out. "
+                        "Use smaller portions and a longer delay in Sender settings.")
+            elif failed:
                 last = pd.read_csv(m.SENT_LOG, dtype=str).fillna("")
                 last = last[last["status"] == "failed"].tail(1)
                 st.error(f"Sent {sent}, failed {failed}. Last error: {last['error'].iloc[0] if len(last) else ''}")

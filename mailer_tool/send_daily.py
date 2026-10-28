@@ -19,7 +19,9 @@ p.add_argument("--business", required=True, help='business name, e.g. "LUAZ" or 
 p.add_argument("--file", help="CSV/Excel file; default = newest file in inbox/")
 p.add_argument("--attach", nargs="*", default=[], help="file names from the business's data folder to attach")
 p.add_argument("--dry-run", action="store_true", help="show counts, send nothing")
-p.add_argument("--allow-resend", action="store_true", help="do not skip those already mailed today")
+p.add_argument("--allow-resend", action="store_true", help="do not skip anyone already mailed")
+p.add_argument("--skip", default="today", help="skip addresses already mailed: today | <days> | ever (default today)")
+p.add_argument("--max", type=int, default=0, help="send at most N emails this run (0 = all)")
 a = p.parse_args()
 
 known = m.list_businesses()
@@ -36,13 +38,18 @@ df = m.read_table(src)
 col = m.find_email_column(df)
 if not col:
     sys.exit("Could not find an email column.")
-ready, rep = m.clean_contacts(df, col, skip_sent_today=not a.allow_resend)
+win = None if a.allow_resend else (a.skip if a.skip in ("today", "ever") else int(a.skip))
+ready, rep = m.clean_contacts(df, col, skip_window=win)
+if a.max:
+    ready = ready.head(a.max)
 print(f"File: {src}\n{rep}")
 if a.dry_run or ready.empty:
     sys.exit(0)
 
-sent, failed = m.send_batch(cfg, os.environ.get("MAILER_PASSWORD", ""), ready,
+sent, failed = m.send_batch(cfg, m.load_secret(), ready,
                             tpl["subject"], tpl["body"], tpl["html"],
                             attachments=m.load_attachments(a.attach), progress=lambda i, t, e, s, f: print(f"{i}/{t} {e} sent={s} failed={f}"))
 print(f"Done. sent={sent} failed={failed}")
+if m.LAST_RUN.get("stopped_early"):
+    print(f"STOPPED EARLY (provider throttling): {m.LAST_RUN['not_attempted']} not attempted. {m.LAST_RUN['reason']}")
 sys.exit(1 if failed else 0)

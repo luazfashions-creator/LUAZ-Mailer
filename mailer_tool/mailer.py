@@ -13,7 +13,7 @@ import zipfile
 import smtplib
 import ssl
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid, formatdate
 from pathlib import Path
@@ -66,7 +66,9 @@ DEFAULT_CONFIG = {
 
 
 # ---------- config ----------
+SENDGRID = {"smtp_host": "smtp.sendgrid.net", "smtp_port": 587, "security": "STARTTLS", "username": "apikey"}
 PRESETS = {
+    "SendGrid (username is always: apikey)": SENDGRID,
     "Gmail": {"smtp_host": "smtp.gmail.com", "smtp_port": 587, "security": "STARTTLS"},
     "Zoho Mail (EU / Germany)": {"smtp_host": "smtp.zoho.eu", "smtp_port": 587, "security": "STARTTLS"},
     "Zoho Mail (US / global)": {"smtp_host": "smtp.zoho.com", "smtp_port": 587, "security": "STARTTLS"},
@@ -74,6 +76,17 @@ PRESETS = {
     "Brevo": {"smtp_host": "smtp-relay.brevo.com", "smtp_port": 587, "security": "STARTTLS"},
     "Amazon SES (eu-central-1)": {"smtp_host": "email-smtp.eu-central-1.amazonaws.com", "smtp_port": 587, "security": "STARTTLS"},
 }
+
+
+DEFAULT_CONFIG.update(SENDGRID)      # SendGrid is the default for every new business
+
+
+def preset_for(cfg: dict) -> str:
+    """Name of the preset that matches this config's host (or '(choose)')."""
+    for name, p in PRESETS.items():
+        if p["smtp_host"] == cfg.get("smtp_host"):
+            return name
+    return "(choose)"
 
 
 def clean_name(name: str) -> str:
@@ -104,7 +117,7 @@ def _first_run_setup() -> None:
         (d / "templates").mkdir(exist_ok=True)
         (d / "data").mkdir(exist_ok=True)
     # LUAZ = the existing (Gmail) setup
-    cfg = dict(DEFAULT_CONFIG, **PRESETS["Gmail"], from_name="LUAZ")
+    cfg = dict(DEFAULT_CONFIG, from_name="LUAZ", from_email="info@luazwellness.de", reply_to="info@luazwellness.de")
     if (BASE / "config.json").exists():
         cfg.update(json.loads((BASE / "config.json").read_text(encoding="utf-8")))
     (luaz / "config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
@@ -115,8 +128,8 @@ def _first_run_setup() -> None:
         for t in (BASE / "templates").glob("*.json"):
             shutil.copy(t, luaz / "templates" / t.name)
     # LUAZ Labs = the new Zoho sender
-    cfg2 = dict(DEFAULT_CONFIG, **PRESETS["Zoho Mail (EU / Germany)"],
-                from_name="LUAZ Labs", from_email="info@luazwellness.de")
+    cfg2 = dict(DEFAULT_CONFIG, from_name="LUAZ Labs", from_email="info@luazlabs.de",
+                reply_to="info@luazwellness.de")
     if (BASE / "config_zoho.json").exists():
         cfg2.update(json.loads((BASE / "config_zoho.json").read_text(encoding="utf-8")))
     (labs / "config.json").write_text(json.dumps(cfg2, indent=2), encoding="utf-8")
@@ -154,6 +167,39 @@ def load_config() -> dict:
 def save_config(cfg: dict) -> None:
     # The password is never written to disk.
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
+# ---------- remembered SMTP password / API key (optional, per business) ----------
+def _secret_file() -> Path:
+    return CONFIG_FILE.parent / ".smtp_secret"
+
+
+def load_secret() -> str:
+    """Key saved with 'remember', else the env var MAILER_PASSWORD_<BUSINESS> / MAILER_PASSWORD, else ''."""
+    env = "MAILER_PASSWORD_" + re.sub(r"\W", "_", CURRENT["name"]).upper()
+    if os.environ.get(env):
+        return os.environ[env]
+    f = _secret_file()
+    if f.exists():
+        return f.read_text(encoding="utf-8").strip()
+    return os.environ.get("MAILER_PASSWORD", "")
+
+
+def has_saved_secret() -> bool:
+    return _secret_file().exists()
+
+
+def save_secret(pw: str) -> None:
+    f = _secret_file()
+    f.write_text(pw.strip(), encoding="utf-8")
+    try:
+        f.chmod(0o600)                      # only the owner can read it
+    except OSError:
+        pass
+
+
+def delete_secret() -> None:
+    _secret_file().unlink(missing_ok=True)
 
 
 # ---------- data folder (per business) ----------
@@ -311,17 +357,28 @@ def _read_emails(path: Path) -> set[str]:
         return {r[0].strip().lower() for r in rows if r and "@" in r[0]}
 
 
-def sent_today() -> set[str]:
+def sent_since(window) -> set[str]:
+    """Addresses that were sent successfully: window = 'today' | number of days | 'ever'."""
     if not SENT_LOG.exists():
         return set()
-    today = datetime.now().strftime("%Y-%m-%d")
     log = pd.read_csv(SENT_LOG, dtype=str).fillna("")
-    ok = log[(log["status"] == "sent") & log["timestamp"].str.startswith(today)]
+    ok = log[log["status"] == "sent"]
+    if window == "today":
+        ok = ok[ok["timestamp"].str.startswith(datetime.now().strftime("%Y-%m-%d"))]
+    elif window != "ever":
+        cutoff = (datetime.now() - timedelta(days=int(window))).strftime("%Y-%m-%d %H:%M:%S")
+        ok = ok[ok["timestamp"] >= cutoff]
     return set(ok["email"].str.lower())
 
 
-def clean_contacts(df: pd.DataFrame, email_col: str, skip_sent_today=True):
-    """Returns (ready_df, report_dict)."""
+def sent_today() -> set[str]:
+    return sent_since("today")
+
+
+def clean_contacts(df: pd.DataFrame, email_col: str, skip_sent_today=True, skip_window="_unset"):
+    """Returns (ready_df, report_dict).
+    skip_window: None = don't skip anyone | 'today' | days (int) | 'ever' - skips addresses already emailed."""
+    window = ("today" if skip_sent_today else None) if skip_window == "_unset" else skip_window
     df = df.copy()
     df["_email"] = df[email_col].astype(str).str.strip().str.lower()
     report = {"total": len(df)}
@@ -339,10 +396,9 @@ def clean_contacts(df: pd.DataFrame, email_col: str, skip_sent_today=True):
     report["unsubscribed"] = int(mask.sum())
     df = df[~mask]
 
-    if skip_sent_today:
-        done = sent_today()
-        mask = df["_email"].isin(done)
-        report["already_sent_today"] = int(mask.sum())
+    if window is not None:
+        mask = df["_email"].isin(sent_since(window))
+        report["already_sent_today"] = int(mask.sum())      # (name kept for compatibility: = already sent)
         df = df[~mask]
     else:
         report["already_sent_today"] = 0
@@ -525,11 +581,26 @@ def send_one(cfg, password, to_row: dict, subject, body, is_html, attachments=No
         server.quit()
 
 
+THROTTLE_RE = re.compile(r"5\.4\.6|unusual sending|too many|rate.?limit|try again later|try after|"
+                         r"quota|exceed|temporar|throttl|blocked|suspend", re.I)
+LAST_RUN: dict = {}
+
+
+def _is_throttle(e: Exception) -> bool:
+    code = getattr(e, "smtp_code", 0) or 0
+    return code in (421, 450, 451, 452, 454) or bool(THROTTLE_RE.search(str(e)))
+
+
 def send_batch(cfg, password, df, subject, body, is_html, progress=None, stop=None, attachments=None):
-    """Send to every row of df. Logs each result. Returns (sent, failed)."""
+    """Send to every row of df. Logs each result. Returns (sent, failed).
+    If the provider starts refusing mail because of sending limits (3 refusals in a row), the run stops by
+    itself - hammering a throttled server makes the block worse. The addresses not attempted are NOT logged,
+    so they are simply sent on the next run. Details in LAST_RUN."""
+    LAST_RUN.clear()
     server = connect(cfg, password)
-    sent = failed = 0
+    sent = failed = streak = 0
     total = len(df)
+    last_err = ""
     try:
         for i, row in enumerate(df.to_dict("records"), 1):
             if stop and stop():
@@ -543,11 +614,17 @@ def send_batch(cfg, password, df, subject, body, is_html, progress=None, stop=No
                     server.send_message(build_message(cfg, row, subject, body, is_html, attachments))
                 _log([[ts, row["_email"], "sent", ""]])
                 sent += 1
+                streak = 0
             except Exception as e:  # noqa: BLE001
                 _log([[ts, row["_email"], "failed", str(e)[:200]]])
                 failed += 1
+                last_err = str(e)
+                streak = streak + 1 if _is_throttle(e) else 0
             if progress:
                 progress(i, total, row["_email"], sent, failed)
+            if streak >= 3 and i < total:
+                LAST_RUN.update(stopped_early=True, not_attempted=total - i, reason=last_err[:300])
+                break
             time.sleep(float(cfg.get("delay_seconds", 1)))
     finally:
         try:

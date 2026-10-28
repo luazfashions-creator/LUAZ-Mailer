@@ -1,11 +1,11 @@
 {
-  "smtp_host": "smtp.zoho.eu",
+  "smtp_host": "smtp.sendgrid.net",
   "smtp_port": 587,
   "security": "STARTTLS",
-  "username": "",
+  "username": "apikey",
   "from_name": "LUAZ Labs",
-  "from_email": "info@luazwellness.de",
-  "reply_to": "",
+  "from_email": "info@luazlabs.de",
+  "reply_to": "info@luazwellness.de",
   "delay_seconds": 1.0,
   "unsubscribe_mailto": "",
   "footer": ""
